@@ -363,6 +363,7 @@ intFromNat = fromIntegral
 -- See Note: Order of constructors
 data IntMap a = Bin {-# UNPACK #-} !Prefix
                     {-# UNPACK #-} !Mask
+                    {-# UNPACK #-} !Size
                     !(IntMap a)
                     !(IntMap a)
 -- Fields:
@@ -381,7 +382,7 @@ data IntMap a = Bin {-# UNPACK #-} !Prefix
 
 type Prefix = Int
 type Mask   = Int
-
+type Size   = Int -- TODO - is this the right type? How big can an IntMap get?
 
 -- Some stuff from "Data.IntSet.Internal", for 'restrictKeys' and
 -- 'withoutKeys' to use.
@@ -445,7 +446,7 @@ instance Foldable.Foldable IntMap where
   fold = go
     where go Nil = mempty
           go (Tip _ v) = v
-          go (Bin _ m l r)
+          go (Bin _ m _ l r)
             | m < 0     = go r `mappend` go l
             | otherwise = go l `mappend` go r
   {-# INLINABLE fold #-}
@@ -456,7 +457,7 @@ instance Foldable.Foldable IntMap where
   foldMap f t = go t
     where go Nil = mempty
           go (Tip _ v) = f v
-          go (Bin _ m l r)
+          go (Bin _ m _ l r)
             | m < 0     = go r `mappend` go l
             | otherwise = go l `mappend` go r
   {-# INLINE foldMap #-}
@@ -474,25 +475,25 @@ instance Foldable.Foldable IntMap where
   elem = go
     where go !_ Nil = False
           go x (Tip _ y) = x == y
-          go x (Bin _ _ l r) = go x l || go x r
+          go x (Bin _ _ _ l r) = go x l || go x r
   {-# INLINABLE elem #-}
   maximum = start
     where start Nil = error "Data.Foldable.maximum (for Data.IntMap): empty map"
           start (Tip _ y) = y
-          start (Bin _ _ l r) = go (start l) r
+          start (Bin _ _ _ l r) = go (start l) r
 
           go !m Nil = m
           go m (Tip _ y) = max m y
-          go m (Bin _ _ l r) = go (go m l) r
+          go m (Bin _ _ _ l r) = go (go m l) r
   {-# INLINABLE maximum #-}
   minimum = start
     where start Nil = error "Data.Foldable.minimum (for Data.IntMap): empty map"
           start (Tip _ y) = y
-          start (Bin _ _ l r) = go (start l) r
+          start (Bin _ _ _ l r) = go (start l) r
 
           go !m Nil = m
           go m (Tip _ y) = min m y
-          go m (Bin _ _ l r) = go (go m l) r
+          go m (Bin _ _ _ l r) = go (go m l) r
   {-# INLINABLE minimum #-}
   sum = foldl' (+) 0
   {-# INLINABLE sum #-}
@@ -508,7 +509,7 @@ instance Traversable IntMap where
 instance NFData a => NFData (IntMap a) where
     rnf Nil = ()
     rnf (Tip _ v) = rnf v
-    rnf (Bin _ _ l r) = rnf l `seq` rnf r
+    rnf (Bin _ _ _ l r) = rnf l `seq` rnf r
 
 #if __GLASGOW_HASKELL__
 
@@ -549,17 +550,15 @@ null Nil = True
 null _   = False
 {-# INLINE null #-}
 
--- | /O(n)/. Number of elements in the map.
+-- | /O(1)/. Number of elements in the map.
 --
 -- > size empty                                   == 0
 -- > size (singleton 1 'a')                       == 1
 -- > size (fromList([(1,'a'), (2,'c'), (3,'b')])) == 3
 size :: IntMap a -> Int
-size = go 0
-  where
-    go !acc (Bin _ _ l r) = go (go acc l) r
-    go acc (Tip _ _) = 1 + acc
-    go acc Nil = acc
+size (Bin _ _ s l r) = s
+size (Tip _ _)       = 1
+size Nil             = 0
 
 -- | /O(min(n,W))/. Is the key a member of the map?
 --
@@ -570,9 +569,9 @@ size = go 0
 member :: Key -> IntMap a -> Bool
 member !k = go
   where
-    go (Bin p m l r) | nomatch k p m = False
-                     | zero k m  = go l
-                     | otherwise = go r
+    go (Bin p m _ l r) | nomatch k p m = False
+                       | zero k m  = go l
+                       | otherwise = go r
     go (Tip kx _) = k == kx
     go Nil = False
 
@@ -590,9 +589,9 @@ notMember k m = not $ member k m
 lookup :: Key -> IntMap a -> Maybe a
 lookup !k = go
   where
-    go (Bin p m l r) | nomatch k p m = Nothing
-                     | zero k m  = go l
-                     | otherwise = go r
+    go (Bin p m _ l r) | nomatch k p m = Nothing
+                       | zero k m  = go l
+                       | otherwise = go r
     go (Tip kx x) | k == kx   = Just x
                   | otherwise = Nothing
     go Nil = Nothing
@@ -602,9 +601,9 @@ lookup !k = go
 find :: Key -> IntMap a -> a
 find !k = go
   where
-    go (Bin p m l r) | nomatch k p m = not_found
-                     | zero k m  = go l
-                     | otherwise = go r
+    go (Bin p m _ l r) | nomatch k p m = not_found
+                       | zero k m  = go l
+                       | otherwise = go r
     go (Tip kx x) | k == kx   = x
                   | otherwise = not_found
     go Nil = not_found
@@ -622,9 +621,9 @@ find !k = go
 findWithDefault :: a -> Key -> IntMap a -> a
 findWithDefault def !k = go
   where
-    go (Bin p m l r) | nomatch k p m = def
-                     | zero k m  = go l
-                     | otherwise = go r
+    go (Bin p m _ l r) | nomatch k p m = def
+                       | zero k m  = go l
+                       | otherwise = go r
     go (Tip kx x) | k == kx   = x
                   | otherwise = def
     go Nil = def
@@ -638,10 +637,10 @@ findWithDefault def !k = go
 -- See Note: Local 'go' functions and capturing.
 lookupLT :: Key -> IntMap a -> Maybe (Key, a)
 lookupLT !k t = case t of
-    Bin _ m l r | m < 0 -> if k >= 0 then go r l else go Nil r
+    Bin _ m _ l r | m < 0 -> if k >= 0 then go r l else go Nil r
     _ -> go Nil t
   where
-    go def (Bin p m l r)
+    go def (Bin p m _ l r)
       | nomatch k p m = if k < p then unsafeFindMax def else unsafeFindMax r
       | zero k m  = go def l
       | otherwise = go l r
@@ -659,10 +658,10 @@ lookupLT !k t = case t of
 -- See Note: Local 'go' functions and capturing.
 lookupGT :: Key -> IntMap a -> Maybe (Key, a)
 lookupGT !k t = case t of
-    Bin _ m l r | m < 0 -> if k >= 0 then go Nil l else go l r
+    Bin _ m _ l r | m < 0 -> if k >= 0 then go Nil l else go l r
     _ -> go Nil t
   where
-    go def (Bin p m l r)
+    go def (Bin p m _ l r)
       | nomatch k p m = if k < p then unsafeFindMin l else unsafeFindMin def
       | zero k m  = go r l
       | otherwise = go def r
@@ -681,10 +680,10 @@ lookupGT !k t = case t of
 -- See Note: Local 'go' functions and capturing.
 lookupLE :: Key -> IntMap a -> Maybe (Key, a)
 lookupLE !k t = case t of
-    Bin _ m l r | m < 0 -> if k >= 0 then go r l else go Nil r
+    Bin _ m _ l r | m < 0 -> if k >= 0 then go r l else go Nil r
     _ -> go Nil t
   where
-    go def (Bin p m l r)
+    go def (Bin p m _ l r)
       | nomatch k p m = if k < p then unsafeFindMax def else unsafeFindMax r
       | zero k m  = go def l
       | otherwise = go l r
@@ -703,10 +702,10 @@ lookupLE !k t = case t of
 -- See Note: Local 'go' functions and capturing.
 lookupGE :: Key -> IntMap a -> Maybe (Key, a)
 lookupGE !k t = case t of
-    Bin _ m l r | m < 0 -> if k >= 0 then go Nil l else go l r
+    Bin _ m _ l r | m < 0 -> if k >= 0 then go Nil l else go l r
     _ -> go Nil t
   where
-    go def (Bin p m l r)
+    go def (Bin p m _ l r)
       | nomatch k p m = if k < p then unsafeFindMin l else unsafeFindMin def
       | zero k m  = go r l
       | otherwise = go def r
@@ -721,14 +720,14 @@ lookupGE !k t = case t of
 unsafeFindMin :: IntMap a -> Maybe (Key, a)
 unsafeFindMin Nil = Nothing
 unsafeFindMin (Tip ky y) = Just (ky, y)
-unsafeFindMin (Bin _ _ l _) = unsafeFindMin l
+unsafeFindMin (Bin _ _ _ l _) = unsafeFindMin l
 
 -- Helper function for lookupLE and lookupLT. It assumes that if a Bin node is
 -- given, it has m > 0.
 unsafeFindMax :: IntMap a -> Maybe (Key, a)
 unsafeFindMax Nil = Nothing
 unsafeFindMax (Tip ky y) = Just (ky, y)
-unsafeFindMax (Bin _ _ _ r) = unsafeFindMax r
+unsafeFindMax (Bin _ _ _ _ r) = unsafeFindMax r
 
 {--------------------------------------------------------------------
   Disjoint
@@ -748,7 +747,7 @@ disjoint Nil _ = True
 disjoint _ Nil = True
 disjoint (Tip kx _) ys = notMember kx ys
 disjoint xs (Tip ky _) = notMember ky xs
-disjoint t1@(Bin p1 m1 l1 r1) t2@(Bin p2 m2 l2 r2)
+disjoint t1@(Bin p1 m1 _ l1 r1) t2@(Bin p2 m2 _ l2 r2)
   | shorter m1 m2 = disjoint1
   | shorter m2 m1 = disjoint2
   | p1 == p2      = disjoint l1 l2 && disjoint r1 r2
