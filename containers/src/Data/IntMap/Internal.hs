@@ -796,10 +796,16 @@ singleton k x
 -- > insert 5 'x' empty                         == singleton 5 'x'
 
 insert :: Key -> a -> IntMap a -> IntMap a
-insert !k x t@(Bin p m l r)
+insert !k x t@(Bin p m _ l r)
   | nomatch k p m = link k (Tip k x) p t
-  | zero k m      = Bin p m (insert k x l) r
-  | otherwise     = Bin p m l (insert k x r)
+  | zero k m      = let s' = (size l') + (size r)
+                        l' = (insert k x l)
+                    in
+                      Bin p m s' l' r
+  | otherwise     = let s' = (size l) + (size r')
+                        r' = (insert k x r)
+                    in
+                      Bin p m s' l r'
 insert k x t@(Tip ky _)
   | k==ky         = Tip k x
   | otherwise     = link k (Tip k x) ky t
