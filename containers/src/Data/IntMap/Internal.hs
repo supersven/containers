@@ -838,10 +838,16 @@ insertWith f k x t
 -- > insertWithKey f 5 "xxx" empty                         == singleton 5 "xxx"
 
 insertWithKey :: (Key -> a -> a -> a) -> Key -> a -> IntMap a -> IntMap a
-insertWithKey f !k x t@(Bin p m l r)
+insertWithKey f !k x t@(Bin p m _ l r)
   | nomatch k p m = link k (Tip k x) p t
-  | zero k m      = Bin p m (insertWithKey f k x l) r
-  | otherwise     = Bin p m l (insertWithKey f k x r)
+  | zero k m      = let l' = (insertWithKey f k x l)
+                        s = size l' + size r
+                    in
+                      Bin p m s l' r
+  | otherwise     = let r' = (insertWithKey f k x r)
+                        s = size l + size r'
+                    in
+                      Bin p m s l r'
 insertWithKey f k x t@(Tip ky y)
   | k == ky       = Tip k (f k x y)
   | otherwise     = link k (Tip k x) ky t
@@ -886,7 +892,7 @@ insertLookupWithKey _ k x Nil = (Nothing,Tip k x)
 -- > delete 5 empty                         == empty
 
 delete :: Key -> IntMap a -> IntMap a
-delete !k t@(Bin p m l r)
+delete !k t@(Bin p m _ l r)
   | nomatch k p m = t
   | zero k m      = binCheckLeft p m (delete k l) r
   | otherwise     = binCheckRight p m l (delete k r)
@@ -2257,11 +2263,11 @@ deleteFindMin = fromMaybe (error "deleteFindMin: empty map has no minimal elemen
 lookupMin :: IntMap a -> Maybe (Key, a)
 lookupMin Nil = Nothing
 lookupMin (Tip k v) = Just (k,v)
-lookupMin (Bin _ m l r)
+lookupMin (Bin _ m _ l r)
   | m < 0     = go r
   | otherwise = go l
     where go (Tip k v)      = Just (k,v)
-          go (Bin _ _ l' _) = go l'
+          go (Bin _ _ _ l' _) = go l'
           go Nil            = Nothing
 
 -- | /O(min(n,W))/. The minimal key of the map. Calls 'error' if the map is empty.
@@ -2275,11 +2281,11 @@ findMin t
 lookupMax :: IntMap a -> Maybe (Key, a)
 lookupMax Nil = Nothing
 lookupMax (Tip k v) = Just (k,v)
-lookupMax (Bin _ m l r)
+lookupMax (Bin _ m _ l r)
   | m < 0     = go l
   | otherwise = go r
     where go (Tip k v)      = Just (k,v)
-          go (Bin _ _ _ r') = go r'
+          go (Bin _ _ _ _ r') = go r'
           go Nil            = Nothing
 
 -- | /O(min(n,W))/. The maximal key of the map. Calls 'error' if the map is empty.
@@ -2336,7 +2342,7 @@ isProperSubmapOfBy predicate t1 t2
       _  -> False
 
 submapCmp :: (a -> b -> Bool) -> IntMap a -> IntMap b -> Ordering
-submapCmp predicate t1@(Bin p1 m1 l1 r1) (Bin p2 m2 l2 r2)
+submapCmp predicate t1@(Bin p1 m1 _ l1 r1) (Bin p2 m2 _ l2 r2)
   | shorter m1 m2  = GT
   | shorter m2 m1  = submapCmpLt
   | p1 == p2       = submapCmpEq
@@ -2384,15 +2390,16 @@ isSubmapOf m1 m2
   > isSubmapOfBy (<) (fromList [(1,1)]) (fromList [(1,1),(2,2)])
   > isSubmapOfBy (==) (fromList [(1,1),(2,2)]) (fromList [(1,1)])
 -}
+-- TODO speedup by comparing sizes? if sizes are not equal, maps aren't
 isSubmapOfBy :: (a -> b -> Bool) -> IntMap a -> IntMap b -> Bool
-isSubmapOfBy predicate t1@(Bin p1 m1 l1 r1) (Bin p2 m2 l2 r2)
+isSubmapOfBy predicate t1@(Bin p1 m1 _ l1 r1) (Bin p2 m2 _ l2 r2)
   | shorter m1 m2  = False
   | shorter m2 m1  = match p1 p2 m2 &&
                        if zero p1 m2
                        then isSubmapOfBy predicate t1 l2
                        else isSubmapOfBy predicate t1 r2
   | otherwise      = (p1==p2) && isSubmapOfBy predicate l1 l2 && isSubmapOfBy predicate r1 r2
-isSubmapOfBy _         (Bin _ _ _ _) _ = False
+isSubmapOfBy _         (Bin _ _ _ _ _) _ = False
 isSubmapOfBy predicate (Tip k x) t     = case lookup k t of
                                          Just y  -> predicate x y
                                          Nothing -> False
@@ -2408,7 +2415,7 @@ isSubmapOfBy _         Nil _           = True
 map :: (a -> b) -> IntMap a -> IntMap b
 map f = go
   where
-    go (Bin p m l r) = Bin p m (go l) (go r)
+    go (Bin p m s l r) = Bin p m s (go l) (go r)
     go (Tip k x)     = Tip k (f x)
     go Nil           = Nil
 
@@ -2433,7 +2440,7 @@ map f = go
 mapWithKey :: (Key -> a -> b) -> IntMap a -> IntMap b
 mapWithKey f t
   = case t of
-      Bin p m l r -> Bin p m (mapWithKey f l) (mapWithKey f r)
+      Bin p m s l r -> Bin p m s (mapWithKey f l) (mapWithKey f r)
       Tip k x     -> Tip k (f k x)
       Nil         -> Nil
 
@@ -2577,7 +2584,11 @@ filterWithKey predicate = go
     where
     go Nil           = Nil
     go t@(Tip k x)   = if predicate k x then t else Nil
-    go (Bin p m l r) = bin p m (go l) (go r)
+    go (Bin p m _ l r) = let l' = go l
+                             r' = go r
+                             s = (size l') + (size r')
+                         in
+                           bin p m s l' r'
 
 -- | /O(n)/. Partition the map according to some predicate. The first
 -- map contains all elements that satisfy the predicate, the second all
@@ -2768,14 +2779,14 @@ splitLookup k t =
 foldr :: (a -> b -> b) -> b -> IntMap a -> b
 foldr f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z l) r -- put negative numbers before
       | otherwise -> go (go z r) l
     _ -> go z t
   where
     go z' Nil           = z'
     go z' (Tip _ x)     = f x z'
-    go z' (Bin _ _ l r) = go (go z' r) l
+    go z' (Bin _ _ _ l r) = go (go z' r) l
 {-# INLINE foldr #-}
 
 -- | /O(n)/. A strict version of 'foldr'. Each application of the operator is
@@ -2784,14 +2795,14 @@ foldr f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
 foldr' :: (a -> b -> b) -> b -> IntMap a -> b
 foldr' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z l) r -- put negative numbers before
       | otherwise -> go (go z r) l
     _ -> go z t
   where
     go !z' Nil          = z'
     go z' (Tip _ x)     = f x z'
-    go z' (Bin _ _ l r) = go (go z' r) l
+    go z' (Bin _ _ _ l r) = go (go z' r) l
 {-# INLINE foldr' #-}
 
 -- | /O(n)/. Fold the values in the map using the given left-associative
@@ -2806,14 +2817,14 @@ foldr' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
 foldl :: (a -> b -> a) -> a -> IntMap b -> a
 foldl f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z r) l -- put negative numbers before
       | otherwise -> go (go z l) r
     _ -> go z t
   where
     go z' Nil           = z'
     go z' (Tip _ x)     = f z' x
-    go z' (Bin _ _ l r) = go (go z' l) r
+    go z' (Bin _ _ _ l r) = go (go z' l) r
 {-# INLINE foldl #-}
 
 -- | /O(n)/. A strict version of 'foldl'. Each application of the operator is
@@ -2822,14 +2833,14 @@ foldl f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
 foldl' :: (a -> b -> a) -> a -> IntMap b -> a
 foldl' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z r) l -- put negative numbers before
       | otherwise -> go (go z l) r
     _ -> go z t
   where
     go !z' Nil          = z'
     go z' (Tip _ x)     = f z' x
-    go z' (Bin _ _ l r) = go (go z' l) r
+    go z' (Bin _ _ _ l r) = go (go z' l) r
 {-# INLINE foldl' #-}
 
 -- | /O(n)/. Fold the keys and values in the map using the given right-associative
@@ -2845,14 +2856,14 @@ foldl' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
 foldrWithKey :: (Key -> a -> b -> b) -> b -> IntMap a -> b
 foldrWithKey f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z l) r -- put negative numbers before
       | otherwise -> go (go z r) l
     _ -> go z t
   where
     go z' Nil           = z'
     go z' (Tip kx x)    = f kx x z'
-    go z' (Bin _ _ l r) = go (go z' r) l
+    go z' (Bin _ _ _ l r) = go (go z' r) l
 {-# INLINE foldrWithKey #-}
 
 -- | /O(n)/. A strict version of 'foldrWithKey'. Each application of the operator is
@@ -2861,14 +2872,14 @@ foldrWithKey f z = \t ->      -- Use lambda t to be inlinable with two arguments
 foldrWithKey' :: (Key -> a -> b -> b) -> b -> IntMap a -> b
 foldrWithKey' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z l) r -- put negative numbers before
       | otherwise -> go (go z r) l
     _ -> go z t
   where
     go !z' Nil          = z'
     go z' (Tip kx x)    = f kx x z'
-    go z' (Bin _ _ l r) = go (go z' r) l
+    go z' (Bin _ _ _ l r) = go (go z' r) l
 {-# INLINE foldrWithKey' #-}
 
 -- | /O(n)/. Fold the keys and values in the map using the given left-associative
@@ -2884,14 +2895,14 @@ foldrWithKey' f z = \t ->      -- Use lambda t to be inlinable with two argument
 foldlWithKey :: (a -> Key -> b -> a) -> a -> IntMap b -> a
 foldlWithKey f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z r) l -- put negative numbers before
       | otherwise -> go (go z l) r
     _ -> go z t
   where
     go z' Nil           = z'
     go z' (Tip kx x)    = f z' kx x
-    go z' (Bin _ _ l r) = go (go z' l) r
+    go z' (Bin _ _ _ l r) = go (go z' l) r
 {-# INLINE foldlWithKey #-}
 
 -- | /O(n)/. A strict version of 'foldlWithKey'. Each application of the operator is
@@ -2900,14 +2911,14 @@ foldlWithKey f z = \t ->      -- Use lambda t to be inlinable with two arguments
 foldlWithKey' :: (a -> Key -> b -> a) -> a -> IntMap b -> a
 foldlWithKey' f z = \t ->      -- Use lambda t to be inlinable with two arguments only.
   case t of
-    Bin _ m l r
+    Bin _ m _ l r
       | m < 0 -> go (go z r) l -- put negative numbers before
       | otherwise -> go (go z l) r
     _ -> go z t
   where
     go !z' Nil          = z'
     go z' (Tip kx x)    = f z' kx x
-    go z' (Bin _ _ l r) = go (go z' l) r
+    go z' (Bin _ _ _ l r) = go (go z' l) r
 {-# INLINE foldlWithKey' #-}
 
 -- | /O(n)/. Fold the keys and values in the map using the given monoid, such that
@@ -2922,7 +2933,7 @@ foldMapWithKey f = go
   where
     go Nil           = mempty
     go (Tip kx x)    = f kx x
-    go (Bin _ m l r)
+    go (Bin _ m _ l r)
       | m < 0     = go r `mappend` go l
       | otherwise = go l `mappend` go r
 {-# INLINE foldMapWithKey #-}
@@ -3221,16 +3232,16 @@ instance Eq a => Eq (IntMap a) where
   t1 /= t2  = nequal t1 t2
 
 equal :: Eq a => IntMap a -> IntMap a -> Bool
-equal (Bin p1 m1 l1 r1) (Bin p2 m2 l2 r2)
-  = (m1 == m2) && (p1 == p2) && (equal l1 l2) && (equal r1 r2)
+equal (Bin p1 m1 s1 l1 r1) (Bin p2 m2 s2 l2 r2)
+  = (s1 == s2) && (m1 == m2) && (p1 == p2) && (equal l1 l2) && (equal r1 r2)
 equal (Tip kx x) (Tip ky y)
   = (kx == ky) && (x==y)
 equal Nil Nil = True
 equal _   _   = False
 
 nequal :: Eq a => IntMap a -> IntMap a -> Bool
-nequal (Bin p1 m1 l1 r1) (Bin p2 m2 l2 r2)
-  = (m1 /= m2) || (p1 /= p2) || (nequal l1 l2) || (nequal r1 r2)
+nequal (Bin p1 m1 s1 l1 r1) (Bin p2 m2 s2 l2 r2)
+  = (s1 /= s2) || (m1 /= m2) || (p1 /= p2) || (nequal l1 l2) || (nequal r1 r2)
 nequal (Tip kx x) (Tip ky y)
   = (kx /= ky) || (x/=y)
 nequal Nil Nil = False
@@ -3239,8 +3250,8 @@ nequal _   _   = True
 #if MIN_VERSION_base(4,9,0)
 -- | @since 0.5.9
 instance Eq1 IntMap where
-  liftEq eq (Bin p1 m1 l1 r1) (Bin p2 m2 l2 r2)
-    = (m1 == m2) && (p1 == p2) && (liftEq eq l1 l2) && (liftEq eq r1 r2)
+  liftEq eq (Bin p1 m1 s1 l1 r1) (Bin p2 m2 s2 l2 r2)
+    = (s1 == s2) && (m1 == m2) && (p1 == p2) && (liftEq eq l1 l2) && (liftEq eq r1 r2)
   liftEq eq (Tip kx x) (Tip ky y)
     = (kx == ky) && (eq x y)
   liftEq _eq Nil Nil = True
@@ -3339,31 +3350,36 @@ link p1 t1 p2 t2 = linkWithMask (branchMask p1 p2) p1 t1 {-p2-} t2
 -- `linkWithMask` is useful when the `branchMask` has already been computed
 linkWithMask :: Mask -> Prefix -> IntMap a -> IntMap a -> IntMap a
 linkWithMask m p1 t1 {-p2-} t2
-  | zero p1 m = Bin p m t1 t2
-  | otherwise = Bin p m t2 t1
+  | zero p1 m = Bin p m s t1 t2
+  | otherwise = Bin p m s t2 t1
   where
     p = mask p1 m
+    s = size t1 + size t2
 {-# INLINE linkWithMask #-}
 
 {--------------------------------------------------------------------
   @bin@ assures that we never have empty trees within a tree.
 --------------------------------------------------------------------}
-bin :: Prefix -> Mask -> IntMap a -> IntMap a -> IntMap a
-bin _ _ l Nil = l
-bin _ _ Nil r = r
-bin p m l r   = Bin p m l r
+bin :: Prefix -> Mask -> Size -> IntMap a -> IntMap a -> IntMap a
+bin _ _ _ l Nil = l
+bin _ _ _ Nil r = r
+bin p m s l r   = Bin p m s l r
 {-# INLINE bin #-}
 
 -- binCheckLeft only checks that the left subtree is non-empty
 binCheckLeft :: Prefix -> Mask -> IntMap a -> IntMap a -> IntMap a
 binCheckLeft _ _ Nil r = r
-binCheckLeft p m l r   = Bin p m l r
+binCheckLeft p m l r   = Bin p m s l r
+  where
+    s = (size l) + (size r)
 {-# INLINE binCheckLeft #-}
 
 -- binCheckRight only checks that the right subtree is non-empty
 binCheckRight :: Prefix -> Mask -> IntMap a -> IntMap a -> IntMap a
 binCheckRight _ _ l Nil = l
-binCheckRight p m l r   = Bin p m l r
+binCheckRight p m l r   = Bin p m s l r
+  where
+    s = (size l) + (size r)
 {-# INLINE binCheckRight #-}
 
 {--------------------------------------------------------------------
